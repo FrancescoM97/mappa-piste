@@ -1,6 +1,6 @@
 import { RESORTS } from './resorts.js';
 import { toGeoJSON, pisteKey, liftKey, pisteLabel, liftLabel, DIFF_LABEL, normName } from './osm.js';
-import { buildGraph, route, nearestNode, costsTo } from './graph.js';
+import { buildGraph, route, nearestNode, costsTo, focusModel } from './graph.js';
 import * as off from './offline.js';
 
 const $ = (s) => document.querySelector(s);
@@ -14,8 +14,11 @@ const today = () => new Date().toISOString().slice(0, 10);
 
 const state = {
   resort: null,
-  model: null,
+  raw: null, // dati completi scaricati
+  model: null, // dati del solo comprensorio (o tutti, se showAll)
   graph: null,
+  showAll: false,
+  excluded: { lifts: 0, pistes: 0 },
   from: null,
   to: null,
   maxRank: 2,
@@ -162,6 +165,12 @@ function refreshHighlight() {
   map.setPaintProperty('piste-labels', 'text-opacity', hlOpacity(1, 0.2));
 }
 
+async function clearMapData() {
+  if (!map?.getSource('pisteLines')) return;
+  const empty = { type: 'FeatureCollection', features: [] };
+  for (const id of ['pisteAreas', 'pisteLines', 'liftLines', 'stations', 'pois', 'route']) map.getSource(id).setData(empty);
+}
+
 async function refreshMapData() {
   await mapReady;
   if (!state.model) return;
@@ -221,8 +230,10 @@ async function selectResort(r, { fly = true } = {}) {
   localStorage.setItem('lastResort', r.id);
   $('#resortName').textContent = r.name;
   state.from = state.to = state.result = null;
-  state.model = state.graph = null;
+  state.model = state.graph = state.raw = null;
   state.auto = null;
+  popup?.remove();
+  clearMapData();
   loadManual();
   updateFields();
   clearRoute();
@@ -260,9 +271,23 @@ function countPistes(model) {
   return new Set(model.pistes.filter((p) => !p.area && p.diff !== 'connection').map(pisteKey)).size;
 }
 
-function setModel(model) {
-  state.model = model;
-  state.graph = buildGraph(model);
+function setModel(raw) {
+  state.raw = raw;
+  if (state.showAll) {
+    state.model = { ...raw, parkings: raw.parkings.map((p) => ({ ...p })), huts: raw.huts.map((h) => ({ ...h })) };
+    state.excluded = { lifts: 0, pistes: 0 };
+  } else {
+    const f = focusModel(raw);
+    state.model = f.model;
+    state.excluded = f.excluded;
+  }
+  state.graph = buildGraph(state.model);
+  if (state.from || state.to) {
+    // i punti scelti si riferiscono alla rete precedente: vanno reimpostati
+    state.from = state.to = state.result = null;
+    updateFields();
+    clearRoute();
+  }
   buildOptions();
   recomputeClosed();
   refreshMapData();
@@ -464,13 +489,55 @@ function startPicking(which) {
     which === 'addResort' ? 'Inquadra tutto il comprensorio, poi premi Conferma' : which === 'from' ? 'Tocca il punto di partenza' : 'Tocca il punto di arrivo';
   $('#pickCancel').textContent = which === 'addResort' ? 'Conferma' : 'Annulla';
   $('#pickHint').classList.add('show');
-  $('#sheet').classList.add('hidden');
-  $('#sheet').classList.remove('open');
+  setSheet('hidden');
 }
 function stopPicking() {
   state.picking = null;
   $('#pickHint').classList.remove('show');
-  $('#sheet').classList.remove('hidden');
+  setSheet('peek');
+}
+
+// ------------------------------------------------------------------ pannello in basso
+function sheetState() {
+  const c = $('#sheet').classList;
+  return c.contains('open') ? 'open' : c.contains('hidden') ? 'hidden' : 'peek';
+}
+function setSheet(st) {
+  const c = $('#sheet').classList;
+  c.toggle('open', st === 'open');
+  c.toggle('hidden', st === 'hidden');
+  updateMini();
+  // quando il pannello si abbassa, il percorso viene reinquadrato usando tutta la mappa
+  if (st !== 'open' && state.result?.geojson && map) {
+    setTimeout(() => fitCoords(state.result.geojson.features.flatMap((f) => f.geometry.coordinates)), 280);
+  }
+}
+function updateMini() {
+  const r = state.result;
+  let t = 'Percorso, piste e parcheggi';
+  if (r?.steps && state.to) t = `⏱ ${fmtTime(r.total)} · 🚡 ${r.liftsCount} → ${state.to.label}`;
+  else if (state.from || state.to) t = 'Percorso: scegli partenza e arrivo';
+  $('#sheetMiniText').textContent = t;
+}
+function bindSheetSwipe() {
+  const sheet = $('#sheet');
+  let y0 = null;
+  const start = (e) => {
+    // il trascinamento parte solo dalla maniglia, dalle schede o dalla barra ridotta
+    if (!e.target.closest('.handle, .tabs, #sheetMini')) return;
+    y0 = e.touches[0].clientY;
+  };
+  const end = (e) => {
+    if (y0 === null) return;
+    const dy = e.changedTouches[0].clientY - y0;
+    y0 = null;
+    if (Math.abs(dy) < 40) return;
+    const order = ['hidden', 'peek', 'open'];
+    const i = order.indexOf(sheetState());
+    setSheet(order[Math.max(0, Math.min(2, i + (dy < 0 ? 1 : -1)))]);
+  };
+  sheet.addEventListener('touchstart', start, { passive: true });
+  sheet.addEventListener('touchend', end, { passive: true });
 }
 
 function setPoint(which, p) {
@@ -516,7 +583,7 @@ function computeRoute() {
     state.result = route(state.graph, state.from.node, state.to.node, routeOpts()) || { none: true };
   }
   renderRoute();
-  $('#sheet').classList.add('open');
+  setSheet('open');
   if (state.result.geojson) {
     mapReady.then(() => {
       map.getSource('route').setData(state.result.geojson);
@@ -532,6 +599,7 @@ function clearRoute() {
 const DIFF_NAME = { 1: 'solo piste blu', 2: 'piste blu e rosse' };
 
 function renderRoute() {
+  updateMini();
   const out = $('#routeOut');
   const r = state.result;
   if (!state.model) {
@@ -550,7 +618,7 @@ function renderRoute() {
     out.innerHTML = `<div class="err">Nessun percorso trovato. Può darsi che un impianto necessario sia chiuso, oppure che in OpenStreetMap manchi un collegamento tra piste.</div>`;
     return;
   }
-  let html = `<div class="summary"><span>⏱ ${fmtTime(r.total)}</span><span>🚡 ${r.liftsCount} ${r.liftsCount === 1 ? 'impianto' : 'impianti'}</span><span>⛷️ ${fmtDist(r.skied)} di piste</span></div>`;
+  let html = `<button class="btn primary block" id="showOnMap">🗺️ Nascondi e guarda il percorso sulla mappa</button><div class="summary"><span>⏱ ${fmtTime(r.total)}</span><span>🚡 ${r.liftsCount} ${r.liftsCount === 1 ? 'impianto' : 'impianti'}</span><span>⛷️ ${fmtDist(r.skied)} di piste</span></div>`;
   if (r.relaxed) {
     html += `<div class="warn">Non c’è un percorso con ${DIFF_NAME[state.maxRank] || 'queste piste'}: ti mostro quello più semplice possibile. I tratti più difficili sono segnati con ⚠.</div>`;
   }
@@ -634,6 +702,12 @@ function renderPistes() {
   if (Object.keys(state.manual).length) s += ` <button class="btn small" id="resetManual">Annulla modifiche</button>`;
   si.innerHTML = s;
 
+  const fi = $('#focusInfo');
+  const hidden = state.excluded.lifts;
+  fi.innerHTML =
+    state.raw && (hidden || state.showAll)
+      ? `<label class="check"><input type="checkbox" id="showAll" ${state.showAll ? 'checked' : ''}> Mostra anche impianti non collegati a ${esc(r.name)}${hidden ? ` (${hidden} nascosti)` : ''}</label>`
+      : '';
   const m = state.model;
   if (!m) { $('#liftList').innerHTML = ''; $('#pisteList').innerHTML = ''; return; }
   const q = normName($('#pisteSearch').value);
@@ -676,6 +750,7 @@ async function renderInfo() {
     <div class="progress" id="dlProgress" hidden><div></div></div>
     <p class="muted" id="dlText">${offi ? `Mappa salvata il ${new Date(offi.at).toLocaleDateString('it-IT')}${offi.failed ? ` (${offi.failed} riquadri non scaricati: riprova)` : ''}.` : 'Prima di andare in pista, premi qui con il wifi: salva piste, rilievo 3D e mappa.'}${used ? ` Spazio usato dall’app: ${(used / 1048576).toFixed(0)} MB.` : ''}</p>
     <button class="btn block" id="refreshData">🔄 Aggiorna piste e impianti</button>
+    ${state.raw ? '<button class="btn block" id="exportData">📤 Esporta i dati scaricati (file .json)</button>' : ''}
     <div class="row">
       ${r.statusUrl ? `<a class="btn small" href="${r.statusUrl}" target="_blank" rel="noopener">Stato impianti</a>` : ''}
       ${r.website ? `<a class="btn small" href="${r.website}" target="_blank" rel="noopener">Sito ufficiale</a>` : ''}
@@ -710,6 +785,26 @@ async function downloadOffline() {
   btn.disabled = false;
   banner(res.failed ? `Salvato, ma ${res.failed} riquadri non sono stati scaricati: riprova più tardi` : 'Comprensorio salvato: funziona anche offline ✅', 5000);
   renderInfo();
+}
+
+async function exportData() {
+  const r = state.resort;
+  const name = `mappa-piste-${r.id}-${today()}.json`;
+  const file = new File([JSON.stringify(state.raw)], name, { type: 'application/json' });
+  try {
+    if (navigator.canShare?.({ files: [file] })) {
+      await navigator.share({ files: [file], title: name });
+      return;
+    }
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(file);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
 }
 
 function addCustomResort() {
@@ -899,12 +994,15 @@ function renderAll() {
 }
 
 function bindEvents() {
-  $('#sheetHandle').onclick = () => $('#sheet').classList.toggle('open');
-  $$('.tabs button').forEach((b) => {
+  $('#sheetHandle').onclick = () => setSheet(sheetState() === 'open' ? 'peek' : 'open');
+  $('#sheetMini').onclick = () => setSheet('open');
+  $('#hideSheet').onclick = () => setSheet('hidden');
+  bindSheetSwipe();
+  $$('.tabs button[data-tab]').forEach((b) => {
     b.onclick = () => {
-      $$('.tabs button').forEach((x) => x.classList.toggle('active', x === b));
+      $$('.tabs button[data-tab]').forEach((x) => x.classList.toggle('active', x === b));
       $$('.panel').forEach((p) => p.classList.toggle('active', p.id === 'tab-' + b.dataset.tab));
-      $('#sheet').classList.add('open');
+      setSheet('open');
       if (b.dataset.tab === 'info') renderInfo();
       if (b.dataset.tab === 'parking') renderParkings();
     };
@@ -926,9 +1024,11 @@ function bindEvents() {
     };
   });
   $('#routeOut').onclick = (e) => {
+    if (e.target.closest('#showOnMap')) return setSheet('hidden');
     const li = e.target.closest('li[data-step]');
     if (!li || !state.result?.steps) return;
     const s = state.result.steps[+li.dataset.step];
+    setSheet('peek');
     fitCoords([s.start, s.end], 16);
   };
   $$('#legend button').forEach((b) => {
@@ -941,6 +1041,12 @@ function bindEvents() {
   });
   $('#pisteSearch').oninput = renderPistes;
   $('#tab-pistes').addEventListener('change', (e) => {
+    if (e.target.id === 'showAll') {
+      state.showAll = e.target.checked;
+      localStorage.setItem('showAll', state.showAll ? '1' : '');
+      if (state.raw) setModel(state.raw);
+      return;
+    }
     const k = e.target.dataset?.key;
     if (k) setOpen(k, e.target.checked);
   });
@@ -959,7 +1065,7 @@ function bindEvents() {
     if (!b) return;
     if (b.dataset.parkShow !== undefined) {
       const p = state.model.parkings[+b.dataset.parkShow];
-      $('#sheet').classList.remove('open');
+      setSheet('hidden');
       map?.flyTo({ center: [p.lon, p.lat], zoom: 16 });
     } else if (b.dataset.parkFrom !== undefined) {
       const i = +b.dataset.parkFrom;
@@ -976,10 +1082,10 @@ function bindEvents() {
       downloadData(state.resort).then((m) => m && (setModel(m), loadAutoStatus()));
     }
     if (id === 'addResort') {
-      $('#sheet').classList.remove('open');
       startPicking('addResort');
     }
     if (id === 'removeResort') removeCustomResort();
+    if (id === 'exportData') exportData();
   });
   $('#pickCancel').onclick = () => {
     const was = state.picking;
@@ -1046,6 +1152,7 @@ function bindEvents() {
 
 // ------------------------------------------------------------------ avvio
 function init() {
+  state.showAll = localStorage.getItem('showAll') === '1';
   const mr = +localStorage.getItem('maxRank');
   if (mr >= 1 && mr <= 3) {
     state.maxRank = mr;

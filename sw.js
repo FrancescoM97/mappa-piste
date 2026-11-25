@@ -1,5 +1,5 @@
 // Service worker: fa funzionare l'app senza internet
-const VERSION = 'v1';
+const VERSION = 'v2';
 const APP_CACHE = 'app-' + VERSION;
 const TILE_CACHE = 'tiles-v1'; // stesso nome usato in js/offline.js
 const DATA_CACHE = 'data-v1';
@@ -61,16 +61,20 @@ async function cacheFirst(cacheName, req, key = req.url) {
   }
 }
 
-async function staleWhileRevalidate(req) {
+// File dell'app: prima la rete (così gli aggiornamenti arrivano subito), poi la copia salvata
+async function appFirstNetwork(req) {
   const c = await caches.open(APP_CACHE);
-  const hit = await c.match(req, { ignoreSearch: true });
-  const net = fetch(req)
-    .then((res) => {
-      if (res.ok) c.put(req, res.clone());
-      return res;
-    })
-    .catch(() => null);
-  return hit || (await net) || new Response('Offline', { status: 503 });
+  try {
+    const res = await Promise.race([
+      fetch(req),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('lenta')), 4000)),
+    ]);
+    if (res.ok) c.put(req, res.clone());
+    return res;
+  } catch {
+    const hit = await c.match(req, { ignoreSearch: true });
+    return hit || new Response('Offline', { status: 503 });
+  }
 }
 
 async function networkFirst(req) {
@@ -91,5 +95,5 @@ self.addEventListener('fetch', (e) => {
   if (u.origin !== location.origin) return; // Overpass ecc.: rete normale
   if (u.pathname.includes('/offline-data/')) return e.respondWith(cacheFirst(DATA_CACHE, req));
   if (u.pathname.includes('/data/status/')) return e.respondWith(networkFirst(req));
-  e.respondWith(staleWhileRevalidate(req));
+  e.respondWith(appFirstNetwork(req));
 });

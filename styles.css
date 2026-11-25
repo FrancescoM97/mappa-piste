@@ -59,7 +59,16 @@ button { font: inherit; color: inherit; cursor: pointer; }
   display: flex; flex-direction: column; padding-bottom: env(safe-area-inset-bottom);
 }
 #sheet.open { transform: translateY(0); }
-#sheet.hidden { transform: translateY(calc(62vh - 58px)); }
+#sheet.hidden { transform: translateY(calc(62vh - 64px)); }
+#sheet.hidden .tabs { display: none; }
+#sheetMini {
+  display: none; align-items: center; gap: 10px; border: 0; background: none; width: 100%;
+  padding: 4px 16px 12px; font-weight: 600; text-align: left; min-height: 44px;
+}
+#sheetMini #sheetMiniText { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#sheetMini .up { color: var(--muted); font-size: 13px; }
+#sheet.hidden #sheetMini { display: flex; }
+.tabs .hide-btn { flex: 0 0 40px; font-size: 20px; line-height: 1; color: var(--muted); }
 .handle { width: 100%; padding: 8px 0 2px; display: flex; justify-content: center; border: 0; background: none; }
 .handle::before { content: ''; width: 42px; height: 5px; border-radius: 3px; background: #c9ced6; }
 .tabs { display: flex; gap: 4px; padding: 4px 10px 8px; border-bottom: 1px solid var(--line); }
@@ -165,3 +174,5 @@ input[type='search'], input[type='text'] {
 .progress > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
 .small-print { font-size: 12px; color: var(--muted); margin-top: 18px; line-height: 1.45; }
 .small-print a { color: inherit; }
+.check { display: flex; gap: 10px; align-items: center; margin-top: 12px; font-size: 14px; }
+.check input { width: 20px; height: 20px; flex: none; }

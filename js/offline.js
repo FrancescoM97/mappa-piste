@@ -58,6 +58,7 @@ export async function downloadResortData(resort, opts) {
     throw new Error('Nessuna pista trovata in quest’area');
   }
   model.resortId = resort.id;
+  model.bbox = resort.bbox;
   await saveResortData(resort.id, model);
   return model;
 }

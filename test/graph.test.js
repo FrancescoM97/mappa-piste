@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseOverpass, toGeoJSON, buildQuery, pisteKey, liftKey } from '../js/osm.js';
-import { buildGraph, route, nearestNode, costsTo } from '../js/graph.js';
+import { buildGraph, route, nearestNode, costsTo, focusModel } from '../js/graph.js';
 
 const way = (id, nodes, coords, tags) => ({
   type: 'way', id, nodes, tags,
@@ -77,4 +77,27 @@ test('percorsi e difficoltà', () => {
   const costs = costsTo(g, hut, { maxRank: 3 });
   assert.ok(Number.isFinite(costs[park]));
   assert.equal(nearestNode(g, 11.5, 46.3), bottom);
+});
+
+test('solo impianti e parcheggi del comprensorio', () => {
+  const extra = {
+    elements: [
+      ...sample.elements,
+      // impianto di un'altra località, non collegato (circa 7 km più a est)
+      way(700, [70, 71], [[11.59, 46.30], [11.59, 46.302]], { aerialway: 'drag_lift', name: 'Skilift Altrove' }),
+      way(710, [72, 73], [[11.5902, 46.3019], [11.5902, 46.3001]], { 'piste:type': 'downhill', 'piste:difficulty': 'easy', name: 'Campetto Altrove' }),
+      { type: 'node', id: 502, lat: 46.2998, lon: 11.5903, tags: { amenity: 'parking', name: 'Parcheggio Altrove' } },
+    ],
+  };
+  const raw = parseOverpass(extra);
+  assert.equal(raw.lifts.length, 2);
+  const { model, excluded } = focusModel(raw);
+  assert.deepEqual(model.lifts.map((l) => l.name), ['Seggiovia Test']);
+  assert.ok(!model.pistes.some((p) => p.name === 'Campetto Altrove'));
+  assert.equal(excluded.lifts, 1);
+  const g = buildGraph(model);
+  const parks = model.parkings.filter((p, i) => g.parkingNode.has(i)).map((p) => p.name);
+  assert.deepEqual(parks, ['Parcheggio Valle']);
+  // il modello originale non viene modificato
+  assert.equal(raw.lifts.length, 2);
 });

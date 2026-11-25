@@ -9,6 +9,8 @@ const SNAP_PISTE = 40; // m: aggancio tra fine/inizio pista e altre piste
 const SNAP_LIFT = 100; // m: aggancio tra stazioni degli impianti e piste
 const SNAP_PARKING = 400; // m: parcheggio -> piste/impianti
 const SNAP_HUT = 150; // m: rifugio -> piste
+const PARKING_TO_LIFT = 500; // m: parcheggio considerato "dell'impianto" se così vicino a una partenza
+const PARKING_TO_PISTE = 150; // m: oppure così vicino a una pista
 
 export function buildGraph(model) {
   const idx = new Map(); // chiave nodo -> indice
@@ -125,9 +127,9 @@ export function buildGraph(model) {
   const parkingNode = new Map();
   model.parkings.forEach((p, i) => {
     const c = [p.lon, p.lat];
-    const nearLift = liftStops.near(c[0], c[1], 600)[0];
+    const nearLift = liftStops.near(c[0], c[1], PARKING_TO_LIFT)[0];
     const near = nearPerWay(c, SNAP_PARKING).slice(0, 10);
-    p.nearLift = !!nearLift || near.some((x) => x.d < 250);
+    p.nearLift = !!nearLift || near.some((x) => x.d < PARKING_TO_PISTE);
     p.liftName = nearLift ? liftLabel(model.lifts[nearLift.item]) : null;
     p.liftDist = nearLift ? Math.round(nearLift.d) : null;
     if (!p.nearLift || !near.length) {
@@ -157,6 +159,55 @@ export function buildGraph(model) {
   });
 
   return { model, idx, lon, lat, adj, grid, parkingNode, hutNode, xy };
+}
+
+/**
+ * Tiene solo la rete del comprensorio: impianti e piste collegati tra loro.
+ * Gli impianti di altre località che cadono nel riquadro (ma non sono collegati)
+ * vengono esclusi, insieme ai loro parcheggi e rifugi.
+ * minShare: una rete separata viene tenuta se ha almeno questa quota
+ * della lunghezza impianti della rete principale.
+ */
+export function focusModel(model, { minShare = 0.2 } = {}) {
+  const g = buildGraph({ ...model, parkings: [], huts: [] });
+  const N = g.lon.length;
+  const parent = new Int32Array(N).map((_, i) => i);
+  const find = (x) => {
+    while (parent[x] !== x) x = parent[x] = parent[parent[x]];
+    return x;
+  };
+  g.adj.forEach((list, a) => list.forEach((e) => { parent[find(a)] = find(e.t); }));
+
+  const liftComp = model.lifts.map((l) => find(g.idx.get(l.nodes[l.stops[0]])));
+  const score = new Map();
+  model.lifts.forEach((l, i) => score.set(liftComp[i], (score.get(liftComp[i]) || 0) + l.length));
+  const copy = (arr) => arr.map((x) => ({ ...x }));
+  if (!score.size) {
+    return { model: { ...model, parkings: copy(model.parkings), huts: copy(model.huts) }, excluded: { lifts: 0, pistes: 0 } };
+  }
+  const max = Math.max(...score.values());
+  const keep = new Set([...score].filter(([, v]) => v >= max * minShare).map(([c]) => c));
+
+  // indice dei nodi tenuti: serve per non perdere tratti di pista vicini ma non agganciati
+  const kept = new GridIndex(100);
+  for (let n = 0; n < N; n++) if (keep.has(find(n))) kept.insert(g.lon[n], g.lat[n], n);
+  const nearKept = (c, r) => kept.near(c[0], c[1], r).length > 0;
+
+  const lifts = model.lifts.filter((_, i) => keep.has(liftComp[i]));
+  const pistes = model.pistes.filter((p) => {
+    if (!p.area) {
+      const n = g.idx.get(p.nodes[0]);
+      if (n !== undefined && keep.has(find(n))) return true;
+    }
+    // aree e frammenti isolati: tenuti se sono a ridosso della rete del comprensorio
+    return nearKept(p.coords[0], 300) || nearKept(p.coords[Math.floor(p.coords.length / 2)], 300);
+  });
+  const [s, w, n, e] = model.bbox || [-90, -180, 90, 180];
+  const peaks = model.peaks.filter((pk) => nearKept([pk.lon, pk.lat], 1500) && pk.lat >= s && pk.lat <= n && pk.lon >= w && pk.lon <= e);
+  return {
+    model: { ...model, lifts, pistes, peaks, parkings: copy(model.parkings), huts: copy(model.huts) },
+    excluded: { lifts: model.lifts.length - lifts.length, pistes: model.pistes.length - pistes.length },
+  };
 }
 
 /** Nodo della rete più vicino a un punto (entro maxD metri). */

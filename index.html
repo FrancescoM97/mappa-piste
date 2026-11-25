@@ -26,11 +26,13 @@
 
   <section id="sheet">
     <button class="handle" id="sheetHandle" aria-label="Apri/chiudi pannello"></button>
+    <button id="sheetMini" aria-label="Mostra il pannello"><span id="sheetMiniText">Percorso</span><span class="up">▲</span></button>
     <nav class="tabs">
       <button data-tab="route" class="active">Percorso</button>
       <button data-tab="pistes">Piste</button>
       <button data-tab="parking">Parcheggi</button>
       <button data-tab="info">Info</button>
+      <button id="hideSheet" class="hide-btn" aria-label="Nascondi il pannello">⌄</button>
     </nav>
 
     <div class="panel active" id="tab-route">
@@ -58,6 +60,7 @@
         <button data-d="other" class="on" style="color:var(--unknown)"><span class="sw" style="background:var(--unknown)"></span>Altre</button>
       </div>
       <div id="statusInfo"></div>
+      <div id="focusInfo"></div>
       <input type="search" id="pisteSearch" placeholder="Cerca impianto o pista…" style="margin-top:14px" />
       <h3>Impianti di risalita</h3>
       <ul class="list" id="liftList"></ul>
