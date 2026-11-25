@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#0b5cd6" />
+  <title>Mappa Piste</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div id="topbar">
+    <button id="resortBtn" class="chip-btn" aria-label="Cambia comprensorio">⛷️ <span id="resortName">Comprensorio</span> ▾</button>
+    <button id="btn3d" class="chip-btn round on" aria-label="Vista 3D">3D</button>
+    <button id="btnLayer" class="chip-btn round" aria-label="Cambia sfondo">🛰️</button>
+    <button id="btnGps" class="chip-btn round" aria-label="La mia posizione">📍</button>
+  </div>
+  <div id="banner"></div>
+  <div id="pickHint"><span id="pickHintText">Tocca un punto sulla mappa</span><button id="pickCancel">Annulla</button></div>
+
+  <section id="sheet">
+    <button class="handle" id="sheetHandle" aria-label="Apri/chiudi pannello"></button>
+    <nav class="tabs">
+      <button data-tab="route" class="active">Percorso</button>
+      <button data-tab="pistes">Piste</button>
+      <button data-tab="parking">Parcheggi</button>
+      <button data-tab="info">Info</button>
+    </nav>
+
+    <div class="panel active" id="tab-route">
+      <div class="od">
+        <div class="od-fields">
+          <button class="field" id="fromField"><span class="dot a"></span><span class="txt ph">Da dove parti?</span></button>
+          <button class="field" id="toField"><span class="dot b"></span><span class="txt ph">Dove vuoi arrivare?</span></button>
+        </div>
+        <button id="swapBtn" aria-label="Inverti partenza e arrivo">⇅</button>
+      </div>
+      <div class="seg" id="diffSeg">
+        <button data-max="1">Solo blu</button>
+        <button data-max="2" class="active">Blu e rosse</button>
+        <button data-max="3">Tutte</button>
+      </div>
+      <div id="routeOut"><p class="muted" style="margin-top:14px">Scegli partenza e arrivo: puoi toccare la mappa, usare la tua posizione o cercare un impianto, una pista, un rifugio o un parcheggio.</p></div>
+    </div>
+
+    <div class="panel" id="tab-pistes">
+      <div class="muted" style="margin-bottom:8px">Evidenzia sulla mappa:</div>
+      <div class="legend" id="legend">
+        <button data-d="blue" class="on" style="color:var(--blue)"><span class="sw" style="background:var(--blue)"></span>Blu</button>
+        <button data-d="red" class="on" style="color:var(--red)"><span class="sw" style="background:var(--red)"></span>Rosse</button>
+        <button data-d="black" class="on" style="color:var(--black)"><span class="sw" style="background:var(--black)"></span>Nere</button>
+        <button data-d="other" class="on" style="color:var(--unknown)"><span class="sw" style="background:var(--unknown)"></span>Altre</button>
+      </div>
+      <div id="statusInfo"></div>
+      <input type="search" id="pisteSearch" placeholder="Cerca impianto o pista…" style="margin-top:14px" />
+      <h3>Impianti di risalita</h3>
+      <ul class="list" id="liftList"></ul>
+      <h3>Piste</h3>
+      <ul class="list" id="pisteList"></ul>
+    </div>
+
+    <div class="panel" id="tab-parking">
+      <div id="parkingIntro" class="muted"></div>
+      <ul class="list" id="parkingList"></ul>
+    </div>
+
+    <div class="panel" id="tab-info"></div>
+  </section>
+
+  <div class="overlay" id="picker">
+    <header>
+      <button class="btn small" id="pickerClose">←</button>
+      <h2 id="pickerTitle">Partenza</h2>
+    </header>
+    <div style="padding:10px 14px 0"><input type="search" id="pickerSearch" placeholder="Cerca impianto, pista, rifugio, parcheggio…" /></div>
+    <div class="body" id="pickerBody"></div>
+  </div>
+
+  <div class="overlay" id="resortPicker">
+    <header>
+      <button class="btn small" id="resortClose">←</button>
+      <h2>Comprensori</h2>
+    </header>
+    <div class="body" id="resortBody"></div>
+  </div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
