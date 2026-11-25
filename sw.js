@@ -1,5 +1,5 @@
 // Service worker: fa funzionare l'app senza internet
-const VERSION = 'v2';
+const VERSION = 'v3';
 const APP_CACHE = 'app-' + VERSION;
 const TILE_CACHE = 'tiles-v1'; // stesso nome usato in js/offline.js
 const DATA_CACHE = 'data-v1';

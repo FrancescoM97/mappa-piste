@@ -16,6 +16,12 @@ export const RESORTS = [
     bbox: [44.15, 10.6, 44.26, 10.82],
     center: [10.72, 44.195],
     zoom: 12.6,
+    // facoltativo: zone del comprensorio [lon, lat] + raggio in metri.
+    // Si tengono solo gli impianti con una stazione in una zona (esclude es. Abetone).
+    areas: [
+      { name: 'Passo del Lupo · Cimoncino · Lago della Ninfa · Le Polle', center: [10.712, 44.205], radius: 3500 },
+      { name: 'Pian del Falco', center: [10.764, 44.225], radius: 1200 },
+    ],
     statusUrl: 'https://www.cimonesci.it/impianti-aperti',
     website: 'https://www.cimonesci.it',
     // opzionale: file JSON con lo stato aperto/chiuso (vedi data/status/LEGGIMI.md)

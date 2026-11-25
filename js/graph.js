@@ -4,7 +4,7 @@ import { DIFF_RANK, LIFT_TYPES, pisteKey, liftKey, pisteLabel, liftLabel } from 
 
 // Velocità medie di discesa (m/s, in pianta) per categoria: servono solo a stimare i tempi
 const SKI_SPEED = { blue: 6, red: 7, black: 6, unknown: 6, freeride: 4, connection: 3.5 };
-const WALK_SPEED = 1.1; // a piedi / spingendo con gli sci
+const WALK_SPEED = 0.8; // a piedi / spingendo con gli sci (lento: si preferisce sciare)
 const SNAP_PISTE = 40; // m: aggancio tra fine/inizio pista e altre piste
 const SNAP_LIFT = 100; // m: aggancio tra stazioni degli impianti e piste
 const SNAP_PARKING = 400; // m: parcheggio -> piste/impianti
@@ -88,7 +88,7 @@ export function buildGraph(model) {
     }
     return out;
   };
-  const walk = (d, extra = 10) => ({ k: 'walk', d, c: extra + d / WALK_SPEED });
+  const walk = (d, extra = 15) => ({ k: 'walk', d, c: extra + d / WALK_SPEED });
 
   // 3. Agganci: dove le piste non condividono nodi con altre piste o con gli impianti
   model.pistes.forEach((p, i) => {
@@ -118,11 +118,18 @@ export function buildGraph(model) {
     });
   });
 
+  // da qui in poi i nodi sono "virtuali" (parcheggi, rifugi): si può partire o arrivare lì,
+  // ma non passarci attraverso (altrimenti diventano scorciatoie a piedi tra piste)
+  const realCount = lon.length;
+
   // 4. Parcheggi (solo quelli vicini a impianti o piste)
-  const liftStops = new GridIndex(200);
+  const liftStops = new GridIndex(200); // partenze di tutti gli impianti
+  const mainStops = new GridIndex(200); // solo impianti "veri" (per dare un nome al parcheggio)
+  const minor = new Set(['magic_carpet', 'rope_tow']);
   model.lifts.forEach((l, i) => {
     const s = l.coords[l.stops[0]];
     liftStops.insert(s[0], s[1], i);
+    if (!minor.has(l.type) && (l.name || l.ref)) mainStops.insert(s[0], s[1], i);
   });
   const parkingNode = new Map();
   model.parkings.forEach((p, i) => {
@@ -130,8 +137,9 @@ export function buildGraph(model) {
     const nearLift = liftStops.near(c[0], c[1], PARKING_TO_LIFT)[0];
     const near = nearPerWay(c, SNAP_PARKING).slice(0, 10);
     p.nearLift = !!nearLift || near.some((x) => x.d < PARKING_TO_PISTE);
-    p.liftName = nearLift ? liftLabel(model.lifts[nearLift.item]) : null;
-    p.liftDist = nearLift ? Math.round(nearLift.d) : null;
+    const named = mainStops.near(c[0], c[1], 1500)[0] || nearLift;
+    p.liftName = named ? liftLabel(model.lifts[named.item]) : null;
+    p.liftDist = named ? Math.round(named.d) : null;
     if (!p.nearLift || !near.length) {
       p.nearLift = false;
       return;
@@ -158,7 +166,7 @@ export function buildGraph(model) {
     }
   });
 
-  return { model, idx, lon, lat, adj, grid, parkingNode, hutNode, xy };
+  return { model, idx, lon, lat, adj, grid, parkingNode, hutNode, xy, realCount };
 }
 
 /**
@@ -168,7 +176,7 @@ export function buildGraph(model) {
  * minShare: una rete separata viene tenuta se ha almeno questa quota
  * della lunghezza impianti della rete principale.
  */
-export function focusModel(model, { minShare = 0.2 } = {}) {
+export function focusModel(model, { minShare = 0.2, areas = null } = {}) {
   const g = buildGraph({ ...model, parkings: [], huts: [] });
   const N = g.lon.length;
   const parent = new Int32Array(N).map((_, i) => i);
@@ -185,8 +193,19 @@ export function focusModel(model, { minShare = 0.2 } = {}) {
   if (!score.size) {
     return { model: { ...model, parkings: copy(model.parkings), huts: copy(model.huts) }, excluded: { lifts: 0, pistes: 0 } };
   }
-  const max = Math.max(...score.values());
-  const keep = new Set([...score].filter(([, v]) => v >= max * minShare).map(([c]) => c));
+  let keep;
+  if (areas?.length) {
+    // zone del comprensorio indicate in resorts.js: si tiene ogni rete con almeno
+    // una stazione dentro una zona (anche se non collegata alle altre, es. Pian del Falco)
+    keep = new Set();
+    model.lifts.forEach((l, i) => {
+      const inside = l.stops.some((s) => areas.some((a) => dist(l.coords[s], a.center) <= a.radius));
+      if (inside) keep.add(liftComp[i]);
+    });
+  } else {
+    const max = Math.max(...score.values());
+    keep = new Set([...score].filter(([, v]) => v >= max * minShare).map(([c]) => c));
+  }
 
   // indice dei nodi tenuti: serve per non perdere tratti di pista vicini ma non agganciati
   const kept = new GridIndex(100);
@@ -264,7 +283,7 @@ function edgeCost(g, e, opts) {
     const rank = DIFF_RANK[p.diff] ?? 2;
     if (rank > opts.maxRank) {
       if (p.diff === 'freeride') return null;
-      return opts.penalize ? e.c * 8 + 60 : null;
+      return opts.penalize ? e.c * 3 + 30 : null;
     }
     return e.c;
   }
@@ -288,6 +307,7 @@ function dijkstra(g, from, to, opts) {
     const [c, n] = h.pop();
     if (c > best[n]) continue;
     if (n === to) break;
+    if (n !== from && n >= g.realCount) continue; // niente transito da parcheggi/rifugi
     for (const e of g.adj[n]) {
       const ec = edgeCost(g, e, opts);
       if (ec === null) continue;
@@ -307,6 +327,11 @@ function dijkstra(g, from, to, opts) {
   return path;
 }
 
+/** true se b è raggiungibile da a ignorando difficoltà e chiusure (zone collegate sugli sci). */
+export function reachable(g, a, b) {
+  return !!dijkstra(g, a, b, { maxRank: 99 });
+}
+
 /** Costi verso il nodo "to" da tutti i nodi (Dijkstra sul grafo inverso). */
 export function costsTo(g, to, opts) {
   if (!g.radj) {
@@ -321,6 +346,7 @@ export function costsTo(g, to, opts) {
   while (h.size) {
     const [c, n] = h.pop();
     if (c > best[n]) continue;
+    if (n !== to && n >= g.realCount) continue;
     for (const e of g.radj[n]) {
       const ec = edgeCost(g, e, opts);
       if (ec === null) continue;
@@ -410,7 +436,26 @@ export function describe(g, path, opts = { maxRank: 3 }) {
   }
   // i piccoli spostamenti a piedi (<60 m) non vengono mostrati come passi separati
   // i piccoli spostamenti (<60 m, es. dall'arrivo dell'impianto all'inizio pista) non sono passi separati
-  const visible = steps.filter((s) => s.type !== 'walk' || s.dist >= 60);
+  let visible = steps.filter((s) => s.type !== 'walk' || s.dist >= 60);
+  // i brevi raccordi senza nome (<150 m) vengono uniti alla pista vicina
+  const merged = [];
+  visible.forEach((s, k) => {
+    const tiny = s.type === 'piste' && !s.named && s.dist < 150 && !s.over;
+    const prev = merged[merged.length - 1];
+    const next = visible[k + 1];
+    if (tiny && prev?.type === 'piste') {
+      prev.dist += s.dist; prev.time += s.time; prev.end = s.end;
+    } else if (tiny && next?.type === 'piste') {
+      next.dist += s.dist; next.time += s.time; next.start = s.start;
+    } else merged.push(s);
+  });
+  visible = [];
+  for (const s of merged) {
+    const prev = visible[visible.length - 1];
+    if (prev && s.type === 'piste' && prev.type === 'piste' && prev.key === s.key) {
+      prev.dist += s.dist; prev.time += s.time; prev.end = s.end; prev.over = prev.over || s.over;
+    } else visible.push(s);
+  }
   return {
     steps: visible,
     total,

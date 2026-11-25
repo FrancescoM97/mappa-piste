@@ -1,6 +1,6 @@
 import { RESORTS } from './resorts.js';
 import { toGeoJSON, pisteKey, liftKey, pisteLabel, liftLabel, DIFF_LABEL, normName } from './osm.js';
-import { buildGraph, route, nearestNode, costsTo, focusModel } from './graph.js';
+import { buildGraph, route, nearestNode, costsTo, focusModel, reachable } from './graph.js';
 import * as off from './offline.js';
 
 const $ = (s) => document.querySelector(s);
@@ -277,7 +277,7 @@ function setModel(raw) {
     state.model = { ...raw, parkings: raw.parkings.map((p) => ({ ...p })), huts: raw.huts.map((h) => ({ ...h })) };
     state.excluded = { lifts: 0, pistes: 0 };
   } else {
-    const f = focusModel(raw);
+    const f = focusModel(raw, { areas: state.resort?.areas });
     state.model = f.model;
     state.excluded = f.excluded;
   }
@@ -580,7 +580,10 @@ function computeRoute() {
   if (state.from.node === state.to.node) {
     state.result = { same: true };
   } else {
-    state.result = route(state.graph, state.from.node, state.to.node, routeOpts()) || { none: true };
+    state.result = route(state.graph, state.from.node, state.to.node, routeOpts()) || {
+      none: true,
+      separate: !reachable(state.graph, state.from.node, state.to.node),
+    };
   }
   renderRoute();
   setSheet('open');
@@ -615,7 +618,9 @@ function renderRoute() {
     return;
   }
   if (r.none) {
-    out.innerHTML = `<div class="err">Nessun percorso trovato. Può darsi che un impianto necessario sia chiuso, oppure che in OpenStreetMap manchi un collegamento tra piste.</div>`;
+    out.innerHTML = r.separate
+      ? `<div class="err">Partenza e arrivo sono in zone non collegate sugli sci (per esempio Pian del Falco): serve spostarsi in auto o in navetta. Se invece sono collegate, nei dati di OpenStreetMap manca un tratto.</div>`
+      : `<div class="err">Nessun percorso con gli impianti aperti: probabilmente un impianto necessario è segnato come chiuso.</div>`;
     return;
   }
   let html = `<button class="btn primary block" id="showOnMap">🗺️ Nascondi e guarda il percorso sulla mappa</button><div class="summary"><span>⏱ ${fmtTime(r.total)}</span><span>🚡 ${r.liftsCount} ${r.liftsCount === 1 ? 'impianto' : 'impianti'}</span><span>⛷️ ${fmtDist(r.skied)} di piste</span></div>`;
