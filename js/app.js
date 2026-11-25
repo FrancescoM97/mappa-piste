@@ -10,7 +10,27 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const COLORS = { blue: '#1c6fe0', red: '#e03131', black: '#1b1b1f', unknown: '#8a8f98', freeride: '#f08c00', connection: '#9aa1ab' };
 const LIFT_ICON = { cable_car: '🚡', gondola: '🚠', mixed_lift: '🚠', chair_lift: '💺', magic_carpet: '➖' };
 const liftIcon = (t) => LIFT_ICON[t] || '⤴️';
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+/** Solo link https verso l'esterno (difesa in profondità per gli indirizzi nei dati). */
+const safeUrl = (u) => {
+  try {
+    const x = new URL(u);
+    return x.protocol === 'https:' ? x.href : null;
+  } catch {
+    return null;
+  }
+};
+const readJson = (key, fallback) => {
+  try {
+    const v = JSON.parse(localStorage.getItem(key));
+    return v ?? fallback;
+  } catch {
+    return fallback;
+  }
+};
 
 const state = {
   resort: null,
@@ -59,9 +79,10 @@ export function fmtDist(m) {
 const mapsLink = (lat, lon) => `https://www.google.com/maps/dir/?api=1&destination=${lat},${lon}&travelmode=driving`;
 
 function allResorts() {
-  let custom = [];
-  try { custom = JSON.parse(localStorage.getItem('customResorts') || '[]'); } catch { /* */ }
-  return [...RESORTS, ...custom.map((r) => ({ ...r, custom: true }))];
+  let custom = readJson('customResorts', []);
+  if (!Array.isArray(custom)) custom = [];
+  custom = custom.filter((r) => r && typeof r.id === 'string' && typeof r.name === 'string' && !off.bboxTooLarge(r.bbox) && Array.isArray(r.center));
+  return [...RESORTS, ...custom.map((r) => ({ id: r.id, name: r.name.slice(0, 60), bbox: r.bbox, center: r.center, zoom: +r.zoom || 12, custom: true }))];
 }
 
 // ------------------------------------------------------------------ mappa
@@ -189,7 +210,7 @@ function sheetPadding() {
 }
 
 function fitCoords(coords, maxZoom = 15.5) {
-  if (!coords.length) return;
+  if (!map || !coords?.length) return;
   const b = new maplibregl.LngLatBounds(coords[0], coords[0]);
   coords.forEach((c) => b.extend(c));
   map.fitBounds(b, { padding: sheetPadding(), maxZoom, duration: 700 });
@@ -226,6 +247,7 @@ function initMap() {
 
 // ------------------------------------------------------------------ comprensorio
 async function selectResort(r, { fly = true } = {}) {
+  if (!r) r = allResorts()[0];
   state.resort = r;
   localStorage.setItem('lastResort', r.id);
   $('#resortName').textContent = r.name;
@@ -241,6 +263,7 @@ async function selectResort(r, { fly = true } = {}) {
   if (map && fly) map.jumpTo({ center: r.center, zoom: r.zoom, pitch: state.is3d ? 55 : 0 });
 
   let model = await off.loadResortData(r.id);
+  if (state.resort !== r) return; // nel frattempo è stato scelto un altro comprensorio
   if (!model) {
     if (!navigator.onLine) {
       banner('Questo comprensorio non è ancora salvato: aprilo una volta con internet.', 0);
@@ -248,13 +271,25 @@ async function selectResort(r, { fly = true } = {}) {
       return;
     }
     model = await downloadData(r);
-    if (!model) return;
+    if (!model || state.resort !== r) return;
   }
-  setModel(model);
+  if (!setModel(model)) {
+    // dati salvati illeggibili (es. versione vecchia): li riscarico
+    if (navigator.onLine) {
+      const fresh = await downloadData(r);
+      if (fresh && state.resort === r) setModel(fresh);
+    }
+  }
   loadAutoStatus();
 }
 
+let busy = false; // un solo download alla volta
 async function downloadData(r) {
+  if (busy) {
+    banner('Download già in corso…');
+    return null;
+  }
+  busy = true;
   banner('Scarico piste, impianti e parcheggi…', 0);
   try {
     const model = await off.downloadResortData(r);
@@ -262,8 +297,10 @@ async function downloadData(r) {
     return model;
   } catch (e) {
     console.error(e);
-    banner('Download non riuscito: ' + (e.message || e), 6000);
+    banner('Download non riuscito: ' + String(e?.message || e).slice(0, 120), 6000);
     return null;
+  } finally {
+    busy = false;
   }
 }
 
@@ -272,6 +309,19 @@ function countPistes(model) {
 }
 
 function setModel(raw) {
+  try {
+    applyModel(raw);
+    return true;
+  } catch (e) {
+    console.error('Dati non validi', e);
+    banner('Dati salvati non validi: premi "Aggiorna piste e impianti" in Info', 6000);
+    return false;
+  }
+}
+
+function applyModel(raw) {
+  if (!raw || !Array.isArray(raw.pistes) || !Array.isArray(raw.lifts)) throw new Error('formato');
+  popup?.remove();
   state.raw = raw;
   if (state.showAll) {
     state.model = { ...raw, parkings: raw.parkings.map((p) => ({ ...p })), huts: raw.huts.map((h) => ({ ...h })) };
@@ -296,12 +346,8 @@ function setModel(raw) {
 
 // ------------------------------------------------------------------ stato aperto/chiuso
 function loadManual() {
-  try {
-    const s = JSON.parse(localStorage.getItem('manual:' + state.resort.id) || 'null');
-    state.manual = s && s.date === today() ? s.marks : {};
-  } catch {
-    state.manual = {};
-  }
+  const s = readJson('manual:' + state.resort.id, null);
+  state.manual = s && s.date === today() && s.marks && typeof s.marks === 'object' ? s.marks : {};
 }
 function saveManual() {
   localStorage.setItem('manual:' + state.resort.id, JSON.stringify({ date: today(), marks: state.manual }));
@@ -315,6 +361,7 @@ async function loadAutoStatus() {
     if (!res.ok) throw new Error();
     const s = await res.json();
     if (state.resort !== r) return;
+    if (!s || typeof s !== 'object' || typeof s.updated !== 'string') throw new Error('formato');
     state.auto = s;
     recomputeClosed();
     refreshMapData();
@@ -326,7 +373,7 @@ async function loadAutoStatus() {
 }
 
 function autoFresh() {
-  return state.auto?.updated && state.auto.updated.slice(0, 10) === today();
+  return typeof state.auto?.updated === 'string' && state.auto.updated.slice(0, 10) === today();
 }
 
 function recomputeClosed() {
@@ -334,8 +381,9 @@ function recomputeClosed() {
   const closed = { lifts: new Set(), pistes: new Set() };
   if (!m) return (state.closed = closed);
   const auto = autoFresh() ? state.auto : null;
-  const autoL = new Map(Object.entries(auto?.lifts || {}).map(([k, v]) => [normName(k), v]));
-  const autoP = new Map(Object.entries(auto?.pistes || {}).map(([k, v]) => [normName(k), v]));
+  const entries = (o) => (o && typeof o === 'object' ? Object.entries(o).filter(([, v]) => v === 'open' || v === 'closed') : []);
+  const autoL = new Map(entries(auto?.lifts).map(([k, v]) => [normName(k), v]));
+  const autoP = new Map(entries(auto?.pistes).map(([k, v]) => [normName(k), v]));
   for (const l of m.lifts) {
     const k = liftKey(l);
     let st = autoL.get(normName(l.name)) || autoL.get(normName(l.ref));
@@ -632,12 +680,12 @@ function renderRoute() {
     let ic, t, sub;
     if (s.type === 'lift') {
       ic = `<span class="ico lift">${liftIcon(state.model.lifts[s.i].type)}</span>`;
-      t = `Prendi ${s.liftType.toLowerCase()} ${esc(s.label)}`;
+      t = `Prendi ${esc(s.liftType.toLowerCase())} ${esc(s.label)}`;
       sub = `${s.rev ? 'in discesa · ' : ''}${fmtDist(s.dist)} · circa ${fmtTime(s.time)} (attesa compresa)`;
     } else if (s.type === 'piste') {
-      ic = `<span class="ico ${s.diff}">⛷</span>`;
+      ic = `<span class="ico ${esc(s.diff)}">⛷</span>`;
       t = s.diff === 'connection' ? `Segui il collegamento ${esc(s.label)}` : `Scendi sulla pista ${esc(s.label)}`;
-      sub = `${s.diff === 'connection' ? 'collegamento' : 'pista ' + DIFF_LABEL[s.diff]} · ${fmtDist(s.dist)} · circa ${fmtTime(s.time)}`;
+      sub = `${s.diff === 'connection' ? 'collegamento' : 'pista ' + esc(DIFF_LABEL[s.diff])} · ${fmtDist(s.dist)} · circa ${fmtTime(s.time)}`;
     } else {
       ic = '<span class="ico walk">🚶</span>';
       t = 'Spostati a piedi o con gli sci';
@@ -677,7 +725,9 @@ function renderParkings() {
     ? `Ordinati in base al tempo per arrivare a <b>${esc(state.to.label)}</b>.`
     : 'Parcheggi vicini agli impianti. Imposta una destinazione nel Percorso per sapere dove conviene parcheggiare.';
   if (!list.length) {
-    ul.innerHTML = '<li class="muted">Nessun parcheggio trovato vicino agli impianti.</li>';
+    ul.innerHTML = state.to
+      ? '<li class="muted">Da nessun parcheggio si arriva a questa destinazione con gli impianti aperti.</li>'
+      : '<li class="muted">Nessun parcheggio trovato vicino agli impianti.</li>';
     return;
   }
   ul.innerHTML = list
@@ -685,7 +735,7 @@ function renderParkings() {
     .map((x, k) => {
       const t = x.cost !== null ? ` · <b>≈ ${fmtTime(x.cost)} alla meta</b>` : '';
       return `<li><span class="sw-dot" style="background:#1d4fbf"></span><div class="name">${k === 0 && x.cost !== null ? '⭐ ' : ''}${esc(parkingName(x.p))}<small>${esc(parkingSub(x.p))}${t}</small>
-        <div class="row"><a class="btn small primary" href="${mapsLink(x.p.lat, x.p.lon)}" target="_blank" rel="noopener">🚗 Naviga</a>
+        <div class="row"><a class="btn small primary" href="${mapsLink(x.p.lat, x.p.lon)}" target="_blank" rel="noopener noreferrer">🚗 Naviga</a>
         <button class="btn small" data-park-show="${x.i}">Mappa</button>
         <button class="btn small" data-park-from="${x.i}">Parti da qui</button></div></div></li>`;
     })
@@ -703,7 +753,7 @@ function renderPistes() {
   } else {
     s = `<p class="muted" style="margin-top:12px">Stato in tempo reale non disponibile: se un impianto o una pista è chiuso, spegnilo qui sotto e il percorso lo eviterà (vale solo per oggi).</p>`;
   }
-  if (r.statusUrl) s += `<a class="btn small" href="${r.statusUrl}" target="_blank" rel="noopener">🌐 Stato ufficiale impianti</a>`;
+  if (safeUrl(r.statusUrl)) s += `<a class="btn small" href="${esc(safeUrl(r.statusUrl))}" target="_blank" rel="noopener noreferrer">🌐 Stato ufficiale impianti</a>`;
   if (Object.keys(state.manual).length) s += ` <button class="btn small" id="resetManual">Annulla modifiche</button>`;
   si.innerHTML = s;
 
@@ -751,45 +801,57 @@ async function renderInfo() {
     <h3 style="margin-top:4px">${esc(r.name)}</h3>
     ${r.subtitle ? `<p class="muted">${esc(r.subtitle)}</p>` : ''}
     ${m ? `<p class="muted">${m.lifts.length} impianti · ${countPistes(m)} piste · dati del ${new Date(m.fetchedAt).toLocaleDateString('it-IT')}</p>` : '<p class="muted">Dati non ancora scaricati.</p>'}
-    <button class="btn primary block" id="dlOffline">⬇️ Salva per l’uso senza internet</button>
+    <button class="btn primary block" id="dlOffline" ${prefetching ? 'disabled' : ''}>⬇️ Salva per l’uso senza internet</button>
     <div class="progress" id="dlProgress" hidden><div></div></div>
     <p class="muted" id="dlText">${offi ? `Mappa salvata il ${new Date(offi.at).toLocaleDateString('it-IT')}${offi.failed ? ` (${offi.failed} riquadri non scaricati: riprova)` : ''}.` : 'Prima di andare in pista, premi qui con il wifi: salva piste, rilievo 3D e mappa.'}${used ? ` Spazio usato dall’app: ${(used / 1048576).toFixed(0)} MB.` : ''}</p>
     <button class="btn block" id="refreshData">🔄 Aggiorna piste e impianti</button>
     ${state.raw ? '<button class="btn block" id="exportData">📤 Esporta i dati scaricati (file .json)</button>' : ''}
     <div class="row">
-      ${r.statusUrl ? `<a class="btn small" href="${r.statusUrl}" target="_blank" rel="noopener">Stato impianti</a>` : ''}
-      ${r.website ? `<a class="btn small" href="${r.website}" target="_blank" rel="noopener">Sito ufficiale</a>` : ''}
-      ${r.mapPdf ? `<a class="btn small" href="${r.mapPdf}" target="_blank" rel="noopener">Cartina PDF</a>` : ''}
+      ${safeUrl(r.statusUrl) ? `<a class="btn small" href="${esc(safeUrl(r.statusUrl))}" target="_blank" rel="noopener noreferrer">Stato impianti</a>` : ''}
+      ${safeUrl(r.website) ? `<a class="btn small" href="${esc(safeUrl(r.website))}" target="_blank" rel="noopener noreferrer">Sito ufficiale</a>` : ''}
+      ${safeUrl(r.mapPdf) ? `<a class="btn small" href="${esc(safeUrl(r.mapPdf))}" target="_blank" rel="noopener noreferrer">Cartina PDF</a>` : ''}
     </div>
     <h3>Altri comprensori</h3>
     <button class="btn block" id="addResort">➕ Aggiungi un comprensorio</button>
     ${r.custom ? '<button class="btn block" id="removeResort">🗑 Rimuovi questo comprensorio</button>' : ''}
-    <p class="small-print">Piste, impianti e parcheggi: © <a href="https://www.openstreetmap.org/copyright" target="_blank">contributori OpenStreetMap</a> (ODbL). Mappa: OpenTopoMap (CC-BY-SA). Rilievo: Terrain Tiles su AWS Open Data. Satellite: Esri.<br>
+    <p class="small-print">Piste, impianti e parcheggi: © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">contributori OpenStreetMap</a> (ODbL). Mappa: OpenTopoMap (CC-BY-SA). Rilievo: Terrain Tiles su AWS Open Data. Satellite: Esri.<br>
     I tempi sono stime. I dati possono contenere errori: segui sempre la segnaletica in pista e le indicazioni del personale.</p>`;
 }
 
+let prefetching = false;
 async function downloadOffline() {
   const r = state.resort;
   if (!navigator.onLine) return banner('Serve una connessione internet');
+  if (prefetching || busy) return banner('Download già in corso…');
+  prefetching = true;
+  try {
+    await doDownloadOffline(r);
+  } catch (e) {
+    banner('Salvataggio non riuscito: ' + String(e?.message || e).slice(0, 120), 6000);
+  } finally {
+    prefetching = false;
+    renderInfo();
+  }
+}
+async function doDownloadOffline(r) {
+  const say = (t) => { const el = $('#dlText'); if (el) el.textContent = t; };
   const btn = $('#dlOffline');
-  btn.disabled = true;
-  const bar = $('#dlProgress');
-  bar.hidden = false;
+  if (btn) btn.disabled = true;
   if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
-  $('#dlText').textContent = 'Scarico piste e impianti…';
+  say('Scarico piste e impianti…');
   const model = await downloadData(r);
   if (model && state.resort === r) {
     setModel(model);
     loadAutoStatus();
   }
-  $('#dlText').textContent = 'Scarico rilievo 3D e mappa…';
+  if (!model) return;
+  say('Scarico rilievo 3D e mappa…');
   const res = await off.prefetchTiles(r, (d, t) => {
-    bar.firstElementChild.style.width = `${Math.round((d / t) * 100)}%`;
-    $('#dlText').textContent = `Scarico rilievo 3D e mappa… ${d}/${t}`;
+    const b2 = $('#dlProgress'), t2 = $('#dlText');
+    if (b2) { b2.hidden = false; b2.firstElementChild.style.width = `${Math.round((d / t) * 100)}%`; }
+    if (t2) t2.textContent = `Scarico rilievo 3D e mappa… ${d}/${t}`;
   });
-  btn.disabled = false;
   banner(res.failed ? `Salvato, ma ${res.failed} riquadri non sono stati scaricati: riprova più tardi` : 'Comprensorio salvato: funziona anche offline ✅', 5000);
-  renderInfo();
 }
 
 async function exportData() {
@@ -814,16 +876,22 @@ async function exportData() {
 
 function addCustomResort() {
   const b = map.getBounds();
-  const name = prompt('Nome del comprensorio?');
+  const bbox = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()].map((v) => +v.toFixed(4));
+  if (off.bboxTooLarge(bbox)) {
+    banner('Area troppo grande: avvicina la mappa al solo comprensorio e riprova', 6000);
+    return;
+  }
+  const name = (prompt('Nome del comprensorio?') || '').trim().slice(0, 60);
   if (!name) return;
   const r = {
     id: 'c' + Date.now().toString(36),
-    name: name.trim(),
-    bbox: [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()].map((v) => +v.toFixed(4)),
+    name,
+    bbox,
     center: [map.getCenter().lng, map.getCenter().lat].map((v) => +v.toFixed(4)),
     zoom: Math.round(map.getZoom() * 10) / 10,
   };
-  const list = JSON.parse(localStorage.getItem('customResorts') || '[]');
+  const list = readJson('customResorts', []);
+  if (!Array.isArray(list)) return;
   list.push(r);
   localStorage.setItem('customResorts', JSON.stringify(list));
   selectResort({ ...r, custom: true }, { fly: false });
@@ -832,7 +900,8 @@ function addCustomResort() {
 function removeCustomResort() {
   const r = state.resort;
   if (!r.custom || !confirm(`Rimuovere ${r.name}?`)) return;
-  const list = JSON.parse(localStorage.getItem('customResorts') || '[]').filter((x) => x.id !== r.id);
+  const old = readJson('customResorts', []);
+  const list = (Array.isArray(old) ? old : []).filter((x) => x?.id !== r.id);
   localStorage.setItem('customResorts', JSON.stringify(list));
   off.deleteResortData(r.id);
   selectResort(allResorts()[0]);
@@ -920,7 +989,7 @@ function showPopup(f, lngLat) {
   } else if (p.kind === 'parking') {
     const pk = m.parkings[p.i];
     html = `<div class="pop"><h4>🅿️ ${esc(parkingName(pk))}</h4><p>${esc(parkingSub(pk))}</p>
-      <div class="row"><a class="btn small primary" href="${mapsLink(pk.lat, pk.lon)}" target="_blank" rel="noopener">🚗 Naviga fin qui</a></div>
+      <div class="row"><a class="btn small primary" href="${mapsLink(pk.lat, pk.lon)}" target="_blank" rel="noopener noreferrer">🚗 Naviga fin qui</a></div>
       ${ptBtns(g.parkingNode.get(p.i), parkingName(pk))}</div>`;
   } else if (p.kind === 'hut') {
     const h = m.huts[p.i];

@@ -4,7 +4,6 @@ import { lineLength } from './geo.js';
 export const OVERPASS_ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
   'https://overpass.private.coffee/api/interpreter',
-  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
 ];
 
 export function buildQuery(bbox) {
@@ -30,18 +29,30 @@ export async function fetchOverpass(bbox, { signal } = {}) {
   const q = buildQuery(bbox);
   let lastErr;
   for (const url of OVERPASS_ENDPOINTS) {
+    // ogni server ha al massimo 2 minuti, poi si passa al successivo
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 120000);
+    const onAbort = () => ctrl.abort();
+    signal?.addEventListener('abort', onAbort);
     try {
       const res = await fetch(url, {
         method: 'POST',
         body: 'data=' + encodeURIComponent(q),
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        signal,
+        signal: ctrl.signal,
+        credentials: 'omit',
+        referrerPolicy: 'no-referrer',
       });
-      if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
-      return await res.json();
+      if (!res.ok) throw new Error(`${new URL(url).host}: HTTP ${res.status}`);
+      const json = await res.json();
+      parseOverpass(json); // verifica che la risposta sia completa prima di accettarla
+      return json;
     } catch (e) {
       if (signal?.aborted) throw e;
       lastErr = e;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
     }
   }
   throw lastErr || new Error('Overpass non raggiungibile');
@@ -92,7 +103,7 @@ export const LIFT_TYPES = {
 };
 
 function parseDuration(v) {
-  if (!v) return null;
+  if (typeof v !== 'string' && typeof v !== 'number') return null;
   v = String(v).trim();
   if (/^\d+(\.\d+)?$/.test(v)) return parseFloat(v) * 60; // minuti
   const m = v.match(/^(\d+):(\d{1,2})(?::(\d{1,2}))?$/);
@@ -103,16 +114,25 @@ function parseDuration(v) {
   return null;
 }
 
+// ---- Validazione: i dati arrivano da server esterni, quindi non ci si fida di nulla ----
+const validLon = (v) => typeof v === 'number' && Number.isFinite(v) && v >= -180 && v <= 180;
+const validLat = (v) => typeof v === 'number' && Number.isFinite(v) && v >= -90 && v <= 90;
+const validPt = (g) => !!g && typeof g === 'object' && validLon(g.lon) && validLat(g.lat);
+/** Testo pulito e di lunghezza limitata, oppure null. */
+const str = (v, max = 100) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
+const validId = (v) => (typeof v === 'number' && Number.isSafeInteger(v)) || (typeof v === 'string' && v.length < 40);
+const tagsOf = (el) => (el.tags && typeof el.tags === 'object' && !Array.isArray(el.tags) ? el.tags : {});
+
 function centerOf(el) {
-  if (el.type === 'node') return [el.lon, el.lat];
-  if (el.center) return [el.center.lon, el.center.lat];
-  if (el.bounds) {
-    const b = el.bounds;
+  if (el.type === 'node') return validPt(el) ? [el.lon, el.lat] : null;
+  if (validPt(el.center)) return [el.center.lon, el.center.lat];
+  const b = el.bounds;
+  if (b && validLon(b.minlon) && validLon(b.maxlon) && validLat(b.minlat) && validLat(b.maxlat)) {
     return [(b.minlon + b.maxlon) / 2, (b.minlat + b.maxlat) / 2];
   }
-  if (el.geometry && el.geometry.length) {
+  if (Array.isArray(el.geometry)) {
     let x = 0, y = 0, n = 0;
-    for (const g of el.geometry) if (g) { x += g.lon; y += g.lat; n++; }
+    for (const g of el.geometry) if (validPt(g)) { x += g.lon; y += g.lat; n++; }
     return n ? [x / n, y / n] : null;
   }
   return null;
@@ -123,38 +143,45 @@ function centerOf(el) {
  * { pistes, lifts, parkings, huts, peaks, fetchedAt }
  */
 export function parseOverpass(json) {
-  const els = json.elements || [];
+  // Overpass in caso di timeout risponde 200 con dati parziali e un "remark": meglio fermarsi
+  if (json && typeof json.remark === 'string' && /runtime error|timed out|out of memory/i.test(json.remark)) {
+    throw new Error('Risposta incompleta dal server delle mappe: riprova tra poco');
+  }
+  const els = Array.isArray(json?.elements) ? json.elements.filter((e) => e && typeof e === 'object' && validId(e.id)) : [];
   const ways = new Map();
   const stationNodes = new Set();
   const relations = [];
   const parkings = [], huts = [], peaks = [];
 
   for (const el of els) {
+    const t = tagsOf(el);
     if (el.type === 'way') ways.set(el.id, el);
-    else if (el.type === 'relation' && el.tags?.['piste:type'] === 'downhill') relations.push(el);
-    if (el.type === 'node' && el.tags?.aerialway === 'station') stationNodes.add(el.id);
+    else if (el.type === 'relation' && t['piste:type'] === 'downhill') relations.push(el);
+    if (el.type === 'node' && t.aerialway === 'station') stationNodes.add(el.id);
   }
 
   // Tag ereditati dalle relazioni (nome, numero, difficoltà) per le vie membro
   const inherited = new Map();
   for (const r of relations) {
-    for (const m of r.members || []) {
-      if (m.type !== 'way') continue;
+    const rt = tagsOf(r);
+    for (const m of Array.isArray(r.members) ? r.members : []) {
+      if (!m || m.type !== 'way') continue;
       const prev = inherited.get(m.ref) || {};
       inherited.set(m.ref, {
-        name: prev.name || r.tags.name,
-        ref: prev.ref || r.tags['piste:ref'] || r.tags.ref,
-        difficulty: prev.difficulty || r.tags['piste:difficulty'],
+        name: prev.name || str(rt.name),
+        ref: prev.ref || str(rt['piste:ref'], 20) || str(rt.ref, 20),
+        difficulty: prev.difficulty || str(rt['piste:difficulty'], 20),
       });
     }
   }
 
   const pistes = [], lifts = [];
   for (const w of ways.values()) {
-    const t = w.tags || {};
-    const geom = (w.geometry || []).filter(Boolean);
-    if (geom.length < 2 || !w.nodes || w.nodes.length !== w.geometry.length) continue;
-    const coords = geom.map((g) => [+g.lon.toFixed(6), +g.lat.toFixed(6)]);
+    const t = tagsOf(w);
+    // la geometria deve essere completa e allineata ai nodi, altrimenti la via si scarta
+    if (!Array.isArray(w.nodes) || !Array.isArray(w.geometry) || w.nodes.length < 2) continue;
+    if (w.nodes.length !== w.geometry.length || !w.geometry.every(validPt) || !w.nodes.every(validId)) continue;
+    const coords = w.geometry.map((g) => [+g.lon.toFixed(6), +g.lat.toFixed(6)]);
     const inh = inherited.get(w.id) || {};
     const ptype = t['piste:type'] || (inherited.has(w.id) ? 'downhill' : null);
 
@@ -162,9 +189,10 @@ export function parseOverpass(json) {
       if (t.disused === 'yes' || t['piste:abandoned'] === 'yes') continue;
       const closed = w.nodes[0] === w.nodes[w.nodes.length - 1];
       const area = t.area === 'yes' || (closed && t.area !== 'no' && ptype === 'downhill');
-      const name = t['piste:name'] || t.name || inh.name || null;
-      const ref = t['piste:ref'] || t.ref || inh.ref || null;
-      const diff = ptype === 'connection' ? 'connection' : diffCategory(t['piste:difficulty'] || inh.difficulty);
+      const name = str(t['piste:name']) || str(t.name) || inh.name || null;
+      const ref = str(t['piste:ref'], 20) || str(t.ref, 20) || inh.ref || null;
+      const diff = ptype === 'connection' ? 'connection' : diffCategory(str(t['piste:difficulty'], 20) || inh.difficulty);
+      if (area && coords.length < 4) continue; // poligono non valido
       pistes.push({
         id: w.id,
         name,
@@ -173,12 +201,12 @@ export function parseOverpass(json) {
         area,
         // le piste da discesa si percorrono nel verso del disegno; i collegamenti in entrambi
         bidir: ptype === 'connection',
-        grooming: t['piste:grooming'] || null,
+        grooming: str(t['piste:grooming'], 30),
         nodes: w.nodes,
         coords,
         length: Math.round(lineLength(coords)),
       });
-    } else if (t.aerialway && LIFT_TYPES[t.aerialway]) {
+    } else if (typeof t.aerialway === 'string' && Object.hasOwn(LIFT_TYPES, t.aerialway)) {
       if (t.disused === 'yes' || t.abandoned === 'yes' || t.construction === 'yes') continue;
       const info = LIFT_TYPES[t.aerialway];
       // fermate: partenza, eventuali stazioni intermedie, arrivo
@@ -188,11 +216,11 @@ export function parseOverpass(json) {
       const length = Math.round(lineLength(coords));
       lifts.push({
         id: w.id,
-        name: t.name || null,
-        ref: t.ref || null,
+        name: str(t.name),
+        ref: str(t.ref, 20),
         type: t.aerialway,
         typeLabel: info.label,
-        occupancy: t['aerialway:occupancy'] || null,
+        occupancy: str(t['aerialway:occupancy'], 10),
         detachable: t['aerialway:detachable'] === 'yes',
         bidir: info.bidir || t.oneway === 'no',
         duration: parseDuration(t['aerialway:duration']),
@@ -205,34 +233,34 @@ export function parseOverpass(json) {
   }
 
   for (const el of els) {
-    const t = el.tags || {};
-    if (!t) continue;
+    const t = tagsOf(el);
     const c = centerOf(el);
     if (!c) continue;
+    if (!['node', 'way', 'relation'].includes(el.type)) continue;
     if (t.amenity === 'parking') {
       if (t.access === 'private' || t.access === 'no' || t.access === 'customers') continue;
       if (t.parking === 'garage' && t.access === 'private') continue;
       parkings.push({
         id: el.type[0] + el.id,
-        name: t.name || null,
+        name: str(t.name),
         lon: +c[0].toFixed(6),
         lat: +c[1].toFixed(6),
-        capacity: t.capacity ? parseInt(t.capacity, 10) || null : null,
-        fee: t.fee || null,
-        kind: t.parking || null,
+        capacity: typeof t.capacity === 'string' && /^\d{1,5}$/.test(t.capacity.trim()) ? parseInt(t.capacity, 10) : null,
+        fee: t.fee === 'yes' || t.fee === 'no' ? t.fee : null,
+        kind: str(t.parking, 30),
       });
     } else if (/^(restaurant|cafe|bar|fast_food)$/.test(t.amenity || '') || /^(alpine_hut|wilderness_hut)$/.test(t.tourism || '')) {
-      if (!t.name) continue;
+      if (!str(t.name)) continue;
       huts.push({
         id: el.type[0] + el.id,
-        name: t.name,
+        name: str(t.name),
         kind: t.tourism === 'alpine_hut' || t.tourism === 'wilderness_hut' ? 'rifugio' : t.amenity === 'restaurant' ? 'ristorante' : 'bar',
         lon: +c[0].toFixed(6),
         lat: +c[1].toFixed(6),
-        ele: t.ele || null,
+        ele: str(t.ele, 10),
       });
-    } else if (t.natural === 'peak' && el.type === 'node') {
-      peaks.push({ id: 'n' + el.id, name: t.name, ele: t.ele || null, lon: el.lon, lat: el.lat });
+    } else if (t.natural === 'peak' && el.type === 'node' && str(t.name)) {
+      peaks.push({ id: 'n' + el.id, name: str(t.name), ele: str(t.ele, 10), lon: el.lon, lat: el.lat });
     }
   }
 

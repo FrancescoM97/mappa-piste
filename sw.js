@@ -1,5 +1,5 @@
 // Service worker: fa funzionare l'app senza internet
-const VERSION = 'v3';
+const VERSION = 'v4';
 const APP_CACHE = 'app-' + VERSION;
 const TILE_CACHE = 'tiles-v1'; // stesso nome usato in js/offline.js
 const DATA_CACHE = 'data-v1';
@@ -48,13 +48,24 @@ self.addEventListener('activate', (e) => {
 const TILE_HOSTS = /(tile\.opentopomap\.org|elevation-tiles-prod|arcgisonline\.com|protomaps\.github\.io)/;
 const normalize = (url) => url.replace(/^https:\/\/[abc]\.tile\.opentopomap\.org\//, 'https://a.tile.opentopomap.org/');
 
+// limite alle tile salvate navigando, così la memoria del telefono non cresce senza fine
+const MAX_TILES = 8000;
+async function trimTiles() {
+  const c = await caches.open(TILE_CACHE);
+  const keys = await c.keys();
+  for (let i = 0; i < keys.length - MAX_TILES; i++) await c.delete(keys[i]); // le più vecchie
+}
+
 async function cacheFirst(cacheName, req, key = req.url) {
   const c = await caches.open(cacheName);
   const hit = await c.match(key);
   if (hit) return hit;
   try {
     const res = await fetch(req);
-    if (res.ok) c.put(key, res.clone());
+    if (res.ok) {
+      c.put(key, res.clone());
+      if (cacheName === TILE_CACHE && Math.random() < 0.02) trimTiles();
+    }
     return res;
   } catch (err) {
     return new Response('', { status: 504, statusText: 'offline' });

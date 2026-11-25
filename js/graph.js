@@ -193,16 +193,18 @@ export function focusModel(model, { minShare = 0.2, areas = null } = {}) {
   if (!score.size) {
     return { model: { ...model, parkings: copy(model.parkings), huts: copy(model.huts) }, excluded: { lifts: 0, pistes: 0 } };
   }
-  let keep;
-  if (areas?.length) {
+  let keep = null;
+  if (Array.isArray(areas) && areas.length) {
     // zone del comprensorio indicate in resorts.js: si tiene ogni rete con almeno
     // una stazione dentro una zona (anche se non collegata alle altre, es. Pian del Falco)
     keep = new Set();
     model.lifts.forEach((l, i) => {
-      const inside = l.stops.some((s) => areas.some((a) => dist(l.coords[s], a.center) <= a.radius));
+      const inside = l.stops.some((s) => areas.some((a) => Array.isArray(a?.center) && dist(l.coords[s], a.center) <= a.radius));
       if (inside) keep.add(liftComp[i]);
     });
-  } else {
+  }
+  if (!keep?.size) {
+    // nessuna zona configurata (o zone sbagliate): si tiene la rete principale e quelle grandi
     const max = Math.max(...score.values());
     keep = new Set([...score].filter(([, v]) => v >= max * minShare).map(([c]) => c));
   }
@@ -329,11 +331,13 @@ function dijkstra(g, from, to, opts) {
 
 /** true se b è raggiungibile da a ignorando difficoltà e chiusure (zone collegate sugli sci). */
 export function reachable(g, a, b) {
+  if (!validNode(g, a) || !validNode(g, b)) return false;
   return !!dijkstra(g, a, b, { maxRank: 99 });
 }
 
 /** Costi verso il nodo "to" da tutti i nodi (Dijkstra sul grafo inverso). */
 export function costsTo(g, to, opts) {
+  if (!validNode(g, to)) return new Float64Array(g.lon.length).fill(Infinity);
   if (!g.radj) {
     g.radj = g.adj.map(() => []);
     g.adj.forEach((list, a) => list.forEach((e) => g.radj[e.t].push({ ...e, t: a })));
@@ -363,8 +367,10 @@ export function costsTo(g, to, opts) {
  * Calcola il percorso. Se con il limite di difficoltà non esiste,
  * riprova permettendo piste più difficili (segnalate con over=true).
  */
+const validNode = (g, n) => Number.isInteger(n) && n >= 0 && n < g.lon.length;
+
 export function route(g, from, to, opts) {
-  if (from === null || to === null) return null;
+  if (!validNode(g, from) || !validNode(g, to)) return null;
   let path = dijkstra(g, from, to, { ...opts, penalize: false });
   let relaxed = false;
   if (!path) {

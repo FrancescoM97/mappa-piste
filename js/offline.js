@@ -18,6 +18,18 @@ export function normalizeTileUrl(url) {
   return url.replace(/^https:\/\/[abc]\.tile\.opentopomap\.org\//, 'https://a.tile.opentopomap.org/');
 }
 
+/**
+ * Un comprensorio non supera qualche decina di km: oltre si rischia di scaricare
+ * milioni di tile o di bloccare il server delle mappe.
+ */
+export const MAX_BBOX_DEG = 0.4;
+export function bboxTooLarge(b) {
+  if (!Array.isArray(b) || b.length !== 4 || !b.every((v) => typeof v === 'number' && Number.isFinite(v))) return true;
+  const [s, w, n, e] = b;
+  if (s >= n || w >= e || s < -85 || n > 85 || w < -180 || e > 180) return true;
+  return n - s > MAX_BBOX_DEG || e - w > MAX_BBOX_DEG;
+}
+
 const dataKey = (id) => new URL(`offline-data/${id}.json`, location.href).href;
 const hasCaches = () => typeof caches !== 'undefined';
 
@@ -52,6 +64,7 @@ export async function deleteResortData(id) {
 
 /** Scarica da OpenStreetMap e salva. */
 export async function downloadResortData(resort, opts) {
+  if (bboxTooLarge(resort.bbox)) throw new Error('Area troppo grande: avvicina la mappa al comprensorio');
   const raw = await fetchOverpass(resort.bbox, opts);
   const model = parseOverpass(raw);
   if (!model.pistes.length && !model.lifts.length) {
@@ -82,6 +95,7 @@ export function tileList(resort) {
 
 /** Salva tile del rilievo, della mappa e dei caratteri. onProgress(fatti, totale, errori) */
 export async function prefetchTiles(resort, onProgress, signal) {
+  if (bboxTooLarge(resort.bbox)) throw new Error('Area troppo grande');
   const urls = tileList(resort);
   const cache = await caches.open(TILE_CACHE);
   let done = 0, failed = 0, i = 0;
